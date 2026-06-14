@@ -104,8 +104,8 @@ git clone --depth=1 https://github.com/sirpdboy/luci-app-eqosplus package/luci-a
 
 
 #上游已经把编译器资源包删除了，先禁用吧
-sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile
-
+rm -rf feeds/packages/lang/rust
+sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile 2 >/dev/null || true
 
 ./scripts/feeds update -a
 ./scripts/feeds install -a

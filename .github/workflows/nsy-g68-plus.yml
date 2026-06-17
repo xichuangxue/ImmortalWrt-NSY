@@ -151,6 +151,11 @@ jobs:
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+        rm -rf dl/rust-1.90.0* dl/rustc-1.90.0*
+        rm -rf build_dir/target-aarch64_generic_musl/host/rustc-1.90.0-src
+        rm -rf build_dir/target-aarch64_generic_musl/rust-1.90.0
+        make package/feeds/packages/rust/download V=s || true
+        make package/feeds/packages/rust/compile
 
     - name: Compile Firmware
       id: compile

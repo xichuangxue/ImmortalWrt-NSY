@@ -109,3 +109,13 @@ sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile
 
 ./scripts/feeds update -a
 ./scripts/feeds install -a
+
+make defconfig >/dev/null 2>&1
+make package/feeds/packages/rust/download -j8 V=s || true
+for i in 1 2 3; do
+	[ "$i" -gt 1 ] && {
+		find build_dir -maxdepth 4 -type d \( -name "rustc-*-src" -o -name "rust-1.*" \) -exec rm -rf {} + 2>/dev/null
+		find build_dir staging_dir \( -name ".prepared*" -o -name ".built*" -o -path "*stamp*" \) -name "*rust*" -delete 2>/dev/null
+	}
+	make package/feeds/packages/rust/host/compile -j1 V=s && break
+done

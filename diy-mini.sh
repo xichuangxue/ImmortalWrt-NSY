@@ -121,7 +121,13 @@ for i in 1 2 3; do
 	[ "$rc" = "0" ] && break
 	for d in build_dir/target-*/host/rustc-*-src/vendor/*/; do
 		[ -f "$d/Cargo.toml" ] && [ ! -f "$d/Cargo.toml.orig" ] && cp "$d/Cargo.toml" "$d/Cargo.toml.orig"
-	done
-	echo "===== vendor .orig backfill done ====="
+		j="$d/.cargo-checksum.json"
+		o="$d/Cargo.toml.orig"
+		[ -f "$j" ] && [ -f "$o" ] && {
+			h=$(sha256sum "$o" | awk '{print $1}')
+			python3 -c "import json,sys; p='$j'; d=json.load(open(p)); d['files']['Cargo.toml.orig']='$h'; json.dump(d,open(p,'w'))" 2>/dev/null
+		}
+		done
+		echo "===== vendor .orig backfill+rehash done ====="
 done
 true

@@ -112,11 +112,13 @@ sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile
 
 make defconfig >/dev/null 2>&1
 make package/feeds/packages/rust/download -j8 V=s || true
+set +e
 for i in 1 2 3; do
-	[ "$i" -gt 1 ] && {
-		echo "[diy-mini] retry $i: nuking rust build dirs"
-		rm -rf build_dir/target-*/host/rustc-*-src build_dir/target-*/host/rust-1.* build_dir/target-*/rust-1.*
-		ls -la build_dir/target-*/host/ 2>/dev/null | grep -i rust || echo "  (no rust dirs left)"
-	}
-	make package/feeds/packages/rust/host/compile -j1 V=s && break
+	echo "===== diy-mini rust attempt $i/3 ====="
+	[ "$i" -gt 1 ] && rm -rf build_dir/target-*/host/rustc-*-src build_dir/target-*/host/rust-1.* build_dir/target-*/rust-1.*
+	make package/feeds/packages/rust/host/compile -j1 V=s
+	rc=$?
+	echo "===== attempt $i exit=$rc ====="
+	[ "$rc" = "0" ] && break
 done
+true

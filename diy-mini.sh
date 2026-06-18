@@ -114,8 +114,9 @@ make defconfig >/dev/null 2>&1
 make package/feeds/packages/rust/download -j8 V=s || true
 for i in 1 2 3; do
 	[ "$i" -gt 1 ] && {
-		find build_dir -maxdepth 4 -type d \( -name "rustc-*-src" -o -name "rust-1.*" \) -exec rm -rf {} + 2>/dev/null
-		find build_dir staging_dir \( -name ".prepared*" -o -name ".built*" -o -path "*stamp*" \) -name "*rust*" -delete 2>/dev/null
+		echo "[diy-mini] retry $i: nuking rust build dirs"
+		rm -rf build_dir/target-*/host/rustc-*-src build_dir/target-*/host/rust-1.* build_dir/target-*/rust-1.*
+		ls -la build_dir/target-*/host/ 2>/dev/null | grep -i rust || echo "  (no rust dirs left)"
 	}
 	make package/feeds/packages/rust/host/compile -j1 V=s && break
 done

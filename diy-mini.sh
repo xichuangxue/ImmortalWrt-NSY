@@ -115,10 +115,13 @@ make package/feeds/packages/rust/download -j8 V=s || true
 set +e
 for i in 1 2 3; do
 	echo "===== diy-mini rust attempt $i/3 ====="
-	[ "$i" -gt 1 ] && rm -rf build_dir/target-*/host/rustc-*-src build_dir/target-*/host/rust-1.* build_dir/target-*/rust-1.*
 	make package/feeds/packages/rust/host/compile -j1 V=s
 	rc=$?
 	echo "===== attempt $i exit=$rc ====="
 	[ "$rc" = "0" ] && break
+	for d in build_dir/target-*/host/rustc-*-src/vendor/*/; do
+		[ -f "$d/Cargo.toml" ] && [ ! -f "$d/Cargo.toml.orig" ] && cp "$d/Cargo.toml" "$d/Cargo.toml.orig"
+	done
+	echo "===== vendor .orig backfill done ====="
 done
 true

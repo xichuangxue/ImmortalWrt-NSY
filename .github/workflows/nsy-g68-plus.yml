@@ -21,6 +21,9 @@ env:
 jobs:
   Build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    
 
     outputs:
       COMMIT_AUTHOR: ${{ steps.clone.outputs.COMMIT_AUTHOR }}

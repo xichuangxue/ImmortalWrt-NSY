@@ -16,11 +16,13 @@ env:
   FIRMWARE_RELEASE: true
   FIRMWARE_TAG: nsy-g16-plus
   TZ: Asia/Shanghai
-  GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   Build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write    
 
     outputs:
       COMMIT_AUTHOR: ${{ steps.clone.outputs.COMMIT_AUTHOR }}

@@ -1,0 +1,187 @@
+name: bd-one
+
+on:
+  workflow_dispatch:
+    inputs:
+      network_mode:
+        description: 'Default ports: router = RGMII WAN + PCIe LAN; lan = all LAN'
+        type: choice
+        options:
+          - router
+          - lan
+        default: router
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/zhoufuli/immortalwrt-rk356x
+  REPO_BRANCH: main
+  CONFIG_FILE: configs/bd-one-docker.config
+  DIY_SCRIPT: diy-mini.sh
+  CLASH_KERNEL: arm64
+  CACHE_TOOLCHAIN: true
+  TZ: Asia/Shanghai
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  Build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Merge Disks
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          df -hT
+          docker images -q | xargs -r docker rmi || true
+          sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android "$AGENT_TOOLSDIRECTORY"
+          sudo -E apt-get -y purge azure-cli 'ghc*' 'zulu*' 'llvm*' firefox 'google*' 'dotnet*' powershell 'openjdk*' 'mongodb*' 'moby*' || true
+          sudo -E apt-get -y update
+          curl -fsSL is.gd/depends_ubuntu_2204 -o /tmp/openwrt-dependencies
+          sudo -E apt-get -y install $(cat /tmp/openwrt-dependencies)
+          sudo -E apt-get -y install python3-pyelftools device-tree-compiler
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get -y clean
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: Clone Source Code
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/workdir"
+          git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" "$GITHUB_WORKSPACE/workdir/openwrt"
+          cd "$GITHUB_WORKSPACE/workdir/openwrt"
+          echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # Register the device before defconfig, or its CONFIG_TARGET selection is lost.
+      - name: Install BD-One Board Support
+        env:
+          NETWORK_MODE: ${{ inputs.network_mode }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-bd-one.py" "$OPENWRT_PATH" --network-mode "$NETWORK_MODE"
+          dtc -q -I dts -O dtb -o "$RUNNER_TEMP/rk3568-bd-one.dtb" "$OPENWRT_PATH/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3568-bd-one.dts"
+
+      - name: Install Feeds
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Variables
+        run: |
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$OPENWRT_PATH/.config"
+          cd "$OPENWRT_PATH"
+          make defconfig
+          grep -qx 'CONFIG_TARGET_rockchip_armv8_DEVICE_bendian_bd-one=y' .config
+
+      - name: Cache Toolchain
+        if: env.CACHE_TOOLCHAIN == 'true'
+        uses: HiGarfield/cachewrtbuild@main
+        with:
+          ccache: false
+          mixkey: bd-one-${{ env.REPO_BRANCH }}-rockchip-armv8
+          prefix: ${{ env.OPENWRT_PATH }}
+
+      - name: Load Custom Configuration
+        env:
+          NETWORK_MODE: ${{ inputs.network_mode }}
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            mkdir -p "$OPENWRT_PATH/files"
+            cp -a "$GITHUB_WORKSPACE/files/." "$OPENWRT_PATH/files/"
+          fi
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-bd-one.py" "$OPENWRT_PATH" --network-mode "$NETWORK_MODE"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$OPENWRT_PATH/.config"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_SCRIPT" "$GITHUB_WORKSPACE"/scripts/*.sh
+          cd "$OPENWRT_PATH"
+          "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+          "$GITHUB_WORKSPACE/scripts/preset-clash-core.sh" "$CLASH_KERNEL"
+
+      - name: Download DL Package
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          make defconfig
+          for option in \
+            CONFIG_TARGET_rockchip_armv8_DEVICE_bendian_bd-one \
+            CONFIG_PACKAGE_kmod-ata-ahci-dwc \
+            CONFIG_PACKAGE_kmod-r8169 \
+            CONFIG_PACKAGE_luci-app-hd-idle \
+            CONFIG_PACKAGE_luci-app-aria2 \
+            CONFIG_PACKAGE_luci-app-nfs; do
+            grep -qx "$option=y" .config
+          done
+          make download -j8
+          find dl -type f -size -1024c -print -delete
+
+      - name: Compile Firmware
+        id: compile
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          mkdir -p files/etc/uci-defaults
+          cp "$GITHUB_WORKSPACE/scripts/init-settings.sh" files/etc/uci-defaults/99-init-settings
+          make -j1 || make -j1 V=s
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "TAG_DATE=$(date +'%Y.%m.%d-%H.%M.%S')" >> "$GITHUB_ENV"
+
+      - name: Organize BD-One Images
+        run: |
+          FIRMWARE_PATH="$OPENWRT_PATH/bin/targets/rockchip/armv8"
+          cd "$FIRMWARE_PATH"
+          shopt -s nullglob
+          images=( *-bendian_bd-one-squashfs-sysupgrade.img.gz )
+          [ "${#images[@]}" -eq 1 ]
+          cp "$OPENWRT_PATH/.config" build.config
+          cp "$OPENWRT_PATH/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3568-bd-one.dts" .
+          cp "$GITHUB_WORKSPACE/boards/bd-one/bootloader.json" bootloader-source.json
+          dtbs=( "$OPENWRT_PATH"/build_dir/target-*/linux-rockchip_armv8/image-rk3568-bd-one.dtb )
+          [ "${#dtbs[@]}" -eq 1 ]
+          cp "${dtbs[0]}" rk3568-bd-one.dtb
+          kernels=( "$OPENWRT_PATH"/build_dir/target-*/linux-rockchip_armv8/linux-*/arch/arm64/boot/Image )
+          [ "${#kernels[@]}" -eq 1 ]
+          cp "${kernels[0]}" Image
+          rootfs=( *-rootfs.tar.gz )
+          [ "${#rootfs[@]}" -eq 1 ]
+          cp "${rootfs[0]}" rootfs.tar.gz
+          sha256sum "${images[0]}" Image rk3568-bd-one.dtb rootfs.tar.gz > bd-one-sha256sums
+          echo "FIRMWARE_PATH=$FIRMWARE_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload Firmware To Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bd-one-${{ env.TAG_DATE }}
+          path: ${{ env.FIRMWARE_PATH }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Firmware To Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: BD-One ${{ env.TAG_DATE }}
+          tag: ${{ env.TAG_DATE }}-bd-one
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.FIRMWARE_PATH }}/*
+          artifactErrorsFailBuild: true
+          body: |
+            ImmortalWrt for BenDian BD-One (RK3568).
+            Source: ${{ env.REPO_URL }} @ ${{ env.SOURCE_COMMIT }}
+            Network mode: ${{ inputs.network_mode }}
+            Includes native SATA AHCI DWC, Docker, hd-idle, Aria2 and NFS.
+            Bootloader: extracted from the supplied vendor Armbian image; see bootloader-source.json.
+            Flash the bendian_bd-one-squashfs-sysupgrade.img.gz disk image.
+            Image, rk3568-bd-one.dtb and rootfs.tar.gz are also included.
+
+      - name: Check Space Usage
+        if: always()
+        run: df -hT

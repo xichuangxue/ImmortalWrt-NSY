@@ -141,6 +141,13 @@ jobs:
         chmod +x $GITHUB_WORKSPACE/scripts/*.sh
         chmod +x $DIY_SCRIPT
         cd $OPENWRT_PATH
+        DTS_SRC="$GITHUB_WORKSPACE/dts/rk3568-nsy-g16-plus.dts"
+        DTS_DST="$OPENWRT_PATH/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3568-nsy-g16-plus.dts"
+        test -f "$DTS_SRC"
+        test -f "$(dirname "$DTS_DST")"
+        cp "$DTS_SRC" "$DTS_DST"
+        echo "Applied custom DTS:"
+        sha256sum "$DTS_DST"        
         $GITHUB_WORKSPACE/$DIY_SCRIPT
         $GITHUB_WORKSPACE/scripts/preset-clash-core.sh $CLASH_KERNEL
         # $GITHUB_WORKSPACE/scripts/preset-adguard-core.sh $CLASH_KERNEL

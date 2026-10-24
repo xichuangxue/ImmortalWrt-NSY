@@ -1,0 +1,14 @@
+{
+  "source_image": "Armbian_22.02.02_rockchip_bd-one_jammy_6.6.44_desktop_2025.07.30.img.gz",
+  "source_image_size_bytes": 1826248339,
+  "source_prefix_sha256": "4b5bb3a17de10fa49d28ceb5aa1e849b8557acdb70ede3947b1b49fbf9bac482",
+  "source_first_partition_lba": 32768,
+  "offset_bytes": 32768,
+  "length_bytes": 16744448,
+  "sha256": "e9bd57545b2f3e42f6abeddfedd158aea1380d8934f78685cef4bb51cc401ebe",
+  "gzip_sha256": "e582ad6855c0aa3453892a98aeb6cbf611d830b1e52ce20687fb863a804491dc",
+  "uboot_version": "U-Boot 2017.09 (Jun 06 2025 - 06:35:51 +0000) OpenWrt",
+  "dts_filename": "rk3568-bd-one.dts",
+  "dts_sha256": "40886baac99d0a250e910334b2b5ff092cf0754a733bebd7e22967ef7d4ac2d0",
+  "note": "Contains only the pre-partition board boot payload from LBA 64 through LBA 32767. GPT, kernel, rootfs and user files are excluded."
+}

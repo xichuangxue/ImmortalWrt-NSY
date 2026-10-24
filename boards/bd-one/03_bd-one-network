@@ -1,0 +1,44 @@
+#!/bin/sh
+
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "bendian,bd-one" ] || exit 0
+
+# Match the integrated MAC by its DT address; PCI enumeration may rename ethN.
+gmac=""
+pci_ports=""
+for netdev in /sys/class/net/*; do
+	[ -e "$netdev/device" ] || continue
+	name="${netdev##*/}"
+	node=$(readlink -f "$netdev/device/of_node")
+	case "$node" in
+		*/ethernet@fe010000) gmac="$name" ;;
+	esac
+	bus=$(readlink -f "$netdev/device/subsystem")
+	case "$bus" in
+		*/pci) pci_ports="${pci_ports:+$pci_ports }$name" ;;
+	esac
+done
+
+board_config_update
+if [ "@NETWORK_MODE@" = "router" ] && [ -n "$gmac" ] && [ -n "$pci_ports" ]; then
+	ucidef_set_interfaces_lan_wan "$pci_ports" "$gmac"
+else
+	# Keep management reachable if no PCI NIC has been detected yet.
+	ports="${gmac}${gmac:+${pci_ports:+ }}${pci_ports}"
+	ucidef_set_interface_lan "${ports:-eth0}"
+fi
+
+# The exported DTS has no fixed MAC address. Derive stable local addresses
+# from the onboard eMMC CID when the bootloader has not supplied them.
+if [ -r /sys/class/block/mmcblk0/device/cid ]; then
+	base_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
+	ucidef_set_interface_macaddr lan "$(macaddr_add "$base_mac" 1)"
+	if [ "@NETWORK_MODE@" = "router" ] && [ -n "$gmac" ] && [ -n "$pci_ports" ]; then
+		ucidef_set_interface_macaddr wan "$base_mac"
+	fi
+fi
+board_config_flush
+
+exit 0

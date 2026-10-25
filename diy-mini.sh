@@ -107,15 +107,24 @@ git clone --depth=1 https://github.com/sirpdboy/luci-app-eqosplus package/luci-a
 sed -i 's/ci-llvm=true/ci-llvm=false/g' feeds/packages/lang/rust/Makefile
 
 
-./scripts/feeds update -a
-./scripts/feeds install -a
+# BD-One has already installed and fingerprinted its feeds before cache restore.
+if [ "${SKIP_FEED_UPDATE:-0}" != "1" ]; then
+	./scripts/feeds update -a
+	./scripts/feeds install -a
+fi
+
+# Existing workflows retain one job unless they opt in to parallel host builds.
+rust_build_jobs="${OPENWRT_BUILD_JOBS:-1}"
+case "$rust_build_jobs" in
+	''|0|*[!0-9]*) rust_build_jobs=1 ;;
+esac
 
 make defconfig >/dev/null 2>&1
 make package/feeds/packages/rust/download -j8 V=s || true
 set +e
 for i in 1 2 3; do
 	echo "===== diy-mini rust attempt $i/3 ====="
-	make package/feeds/packages/rust/host/compile -j1 V=s
+	make package/feeds/packages/rust/host/compile -j"$rust_build_jobs" V=s
 	rc=$?
 	echo "===== attempt $i exit=$rc ====="
 	[ "$rc" = "0" ] && break

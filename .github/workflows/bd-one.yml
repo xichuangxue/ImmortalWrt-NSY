@@ -21,6 +21,7 @@ env:
   DIY_SCRIPT: diy-mini.sh
   CLASH_KERNEL: arm64
   CACHE_TOOLCHAIN: true
+  SKIP_FEED_UPDATE: '1'
   TZ: Asia/Shanghai
 
 defaults:
@@ -31,6 +32,25 @@ jobs:
   Build:
     runs-on: ubuntu-22.04
     steps:
+      - name: Check Runner Performance
+        timeout-minutes: 2
+        run: |
+          date -Is
+          printf 'Runner: %s; OS: %s; architecture: %s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+          cat /etc/os-release
+          lscpu
+          nproc
+          free -h
+          df -hT
+          cpu_jobs=$(nproc)
+          memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          memory_jobs=$((memory_kib / 3145728))
+          [ "$memory_jobs" -ge 1 ] || memory_jobs=1
+          build_jobs=$cpu_jobs
+          [ "$build_jobs" -le "$memory_jobs" ] || build_jobs=$memory_jobs
+          echo "OPENWRT_BUILD_JOBS=$build_jobs" >> "$GITHUB_ENV"
+          printf 'Build parallelism: %s jobs (CPU=%s, memory limit=%s)\n' "$build_jobs" "$cpu_jobs" "$memory_jobs"
+
       - name: Merge Disks
         uses: easimon/maximize-build-space@master
         with:
@@ -42,16 +62,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialization Environment
+        timeout-minutes: 30
         env:
           DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
         run: |
+          echo "::group::Free disk space $(date -Is)"
           df -hT
           docker images -q | xargs -r docker rmi || true
           sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android "$AGENT_TOOLSDIRECTORY"
-          sudo -E apt-get -y purge azure-cli 'ghc*' 'zulu*' 'llvm*' firefox 'google*' 'dotnet*' powershell 'openjdk*' 'mongodb*' 'moby*' || true
-          sudo -E apt-get -y update
+          echo '::endgroup::'
+          # Keep the runner's installed tools and their dependencies. Bulk purge
+          # and autoremove can spend the entire job in dpkg configuration scripts.
+          echo "::group::APT update $(date -Is)"
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 -y update
+          echo '::endgroup::'
+          echo "::group::Install build dependencies $(date -Is)"
           # Keep the Ubuntu 22.04 build dependencies here instead of a remote short URL.
-          sudo -E apt-get -y install --no-install-recommends \
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 -y install --no-install-recommends \
             asciidoc autoconf automake autopoint bc binutils binutils-gold bison \
             build-essential bzip2 ca-certificates ccache clang cmake cpio curl \
             device-tree-compiler file flex gawk gettext git gperf \
@@ -64,9 +92,11 @@ jobs:
             qemu-utils re2c rsync scons squashfs-tools subversion swig \
             tar texinfo time u-boot-tools unzip uuid-dev wget xmlto xsltproc xxd \
             xz-utils zlib1g-dev zstd
-          sudo -E apt-get -y autoremove --purge
+          echo '::endgroup::'
           sudo -E apt-get -y clean
           sudo timedatectl set-timezone "$TZ"
+          date -Is
+          df -hT
 
       - name: Clone Source Code
         run: |
@@ -91,19 +121,37 @@ jobs:
           ./scripts/feeds install -a
 
       - name: Generate Variables
+        id: variables
         run: |
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$OPENWRT_PATH/.config"
           cd "$OPENWRT_PATH"
           make defconfig
           grep -qx 'CONFIG_TARGET_rockchip_armv8_DEVICE_bendian_bd-one=y' .config
+          cache_digest=$(
+            {
+              printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$SOURCE_COMMIT"
+              sha256sum < "$GITHUB_WORKSPACE/$CONFIG_FILE"
+              sha256sum < "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+              for feed in packages luci routing telephony; do
+                git -C "feeds/$feed" rev-parse HEAD
+              done
+            } | sha256sum | cut -d ' ' -f1
+          )
+          echo "cache_key=bd-one-host-v1-$cache_digest" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Toolchain
+      - name: Restore Build Cache
+        id: build_cache
         if: env.CACHE_TOOLCHAIN == 'true'
-        uses: HiGarfield/cachewrtbuild@main
+        uses: actions/cache/restore@v4
         with:
-          ccache: false
-          mixkey: bd-one-${{ env.REPO_BRANCH }}-rockchip-armv8
-          prefix: ${{ env.OPENWRT_PATH }}
+          key: ${{ steps.variables.outputs.cache_key }}
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host*
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/staging_dir/target-*/host
+            ${{ env.OPENWRT_PATH }}/build_dir/host*
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/target-*/host
 
       - name: Load Custom Configuration
         env:
@@ -136,13 +184,40 @@ jobs:
           make download -j8
           find dl -type f -size -1024c -print -delete
 
+      - name: Build Toolchain
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          date -Is
+          make toolchain/install -j"$OPENWRT_BUILD_JOBS" || make toolchain/install -j1 V=s
+          date -Is
+
+      # Save before the long package/image build so a later timeout does not
+      # discard the completed toolchain and Rust host compiler from the DIY step.
+      - name: Save Build Cache Before Firmware Compilation
+        if: env.CACHE_TOOLCHAIN == 'true' && steps.build_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 15
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.variables.outputs.cache_key }}
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host*
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/staging_dir/target-*/host
+            ${{ env.OPENWRT_PATH }}/build_dir/host*
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/target-*/host
+
       - name: Compile Firmware
         id: compile
         working-directory: ${{ env.OPENWRT_PATH }}
         run: |
           mkdir -p files/etc/uci-defaults
           cp "$GITHUB_WORKSPACE/scripts/init-settings.sh" files/etc/uci-defaults/99-init-settings
-          make -j1 || make -j1 V=s
+          date -Is
+          printf 'Compile firmware with %s jobs\n' "$OPENWRT_BUILD_JOBS"
+          make -j"$OPENWRT_BUILD_JOBS" || make -j1 V=s
+          date -Is
           echo "status=success" >> "$GITHUB_OUTPUT"
           echo "TAG_DATE=$(date +'%Y.%m.%d-%H.%M.%S')" >> "$GITHUB_ENV"
 

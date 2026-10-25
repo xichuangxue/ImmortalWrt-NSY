@@ -106,6 +106,18 @@ jobs:
           echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
           echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      - name: Fix Binutils Host Library Paths
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          # Match upstream OpenWrt: host binutils must use host zstd, even when
+          # a restored toolchain already contains target musl headers/libraries.
+          if grep -Fqx 'export ZSTD_CFLAGS=-I$(STAGING_DIR_HOST)/include -pthread' toolchain/binutils/Makefile &&
+             grep -Fqx 'export ZSTD_LIBS=-L$(STAGING_DIR_HOST)/lib -lzstd -lpthread' toolchain/binutils/Makefile; then
+            echo 'Binutils host zstd paths already fixed upstream.'
+          else
+            patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/bd-one/010-binutils-host-zstd.patch"
+          fi
+
       # Register the device before defconfig, or its CONFIG_TARGET selection is lost.
       - name: Install BD-One Board Support
         env:
@@ -132,12 +144,13 @@ jobs:
               printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$SOURCE_COMMIT"
               sha256sum < "$GITHUB_WORKSPACE/$CONFIG_FILE"
               sha256sum < "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+              sha256sum < "$GITHUB_WORKSPACE/patches/bd-one/010-binutils-host-zstd.patch"
               for feed in packages luci routing telephony; do
                 git -C "feeds/$feed" rev-parse HEAD
               done
             } | sha256sum | cut -d ' ' -f1
           )
-          echo "cache_key=bd-one-host-v1-$cache_digest" >> "$GITHUB_OUTPUT"
+          echo "cache_key=bd-one-host-v2-$cache_digest" >> "$GITHUB_OUTPUT"
 
       - name: Restore Build Cache
         id: build_cache

@@ -1,0 +1,10 @@
+diff --git a/toolchain/binutils/Makefile b/toolchain/binutils/Makefile
+--- a/toolchain/binutils/Makefile
++++ b/toolchain/binutils/Makefile
+@@ -33,3 +33,6 @@
+ include $(INCLUDE_DIR)/toolchain-build.mk
+ 
++export ZSTD_CFLAGS=-I$(STAGING_DIR_HOST)/include -pthread
++export ZSTD_LIBS=-L$(STAGING_DIR_HOST)/lib -lzstd -lpthread
++
+ ifdef CONFIG_GCC_USE_GRAPHITE

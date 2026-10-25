@@ -241,7 +241,15 @@ jobs:
           [ "${#rootfs[@]}" -eq 1 ]
           cp "${rootfs[0]}" rootfs.tar.gz
           sha256sum "${images[0]}" Image rk3568-bd-one.dtb rootfs.tar.gz > bd-one-sha256sums
-          echo "FIRMWARE_PATH=$FIRMWARE_PATH" >> "$GITHUB_ENV"
+          # Release assets must be files. Stage top-level files separately so
+          # the upload glob cannot match the OpenWrt packages directory.
+          release_path=$(mktemp -d "$RUNNER_TEMP/bd-one-release.XXXXXX")
+          find -L "$FIRMWARE_PATH" -maxdepth 1 -type f -exec cp -t "$release_path" -- {} +
+          if [ -d "$FIRMWARE_PATH/packages" ]; then
+            # Package entries can be symlinks into bin/packages; include their contents.
+            tar --dereference -czf "$release_path/packages.tar.gz" -C "$FIRMWARE_PATH" packages
+          fi
+          echo "FIRMWARE_PATH=$release_path" >> "$GITHUB_ENV"
 
       - name: Upload Firmware To Artifact
         uses: actions/upload-artifact@v4
@@ -267,6 +275,7 @@ jobs:
             Bootloader: extracted from the supplied vendor Armbian image; see bootloader-source.json.
             Flash the bendian_bd-one-squashfs-sysupgrade.img.gz disk image.
             Image, rk3568-bd-one.dtb and rootfs.tar.gz are also included.
+            Target packages are bundled in packages.tar.gz when present.
 
       - name: Check Space Usage
         if: always()

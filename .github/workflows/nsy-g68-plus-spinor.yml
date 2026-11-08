@@ -1,0 +1,306 @@
+name: nsy-g68-plus-spinor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/zhoufuli/immortalwrt-rk356x
+  REPO_BRANCH: main
+  CONFIG_FILE: configs/g68-plus-spinor.config
+  DTS_FILE: dts/rk3568-nsy-g68-plus-spiNor.dts
+  DIY_SCRIPT: diy-mini.sh
+  CLASH_KERNEL: arm64
+  CACHE_TOOLCHAIN: true
+  SKIP_FEED_UPDATE: '1'
+  TZ: Asia/Shanghai
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  Build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check Runner Performance
+        timeout-minutes: 2
+        run: |
+          date -Is
+          printf 'Runner: %s; OS: %s; architecture: %s\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"
+          cat /etc/os-release
+          lscpu
+          nproc
+          free -h
+          df -hT
+          cpu_jobs=$(nproc)
+          memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          memory_jobs=$((memory_kib / 3145728))
+          [ "$memory_jobs" -ge 1 ] || memory_jobs=1
+          build_jobs=$cpu_jobs
+          [ "$build_jobs" -le "$memory_jobs" ] || build_jobs=$memory_jobs
+          echo "OPENWRT_BUILD_JOBS=$build_jobs" >> "$GITHUB_ENV"
+          printf 'Build parallelism: %s jobs (CPU=%s, memory limit=%s)\n' "$build_jobs" "$cpu_jobs" "$memory_jobs"
+
+      - name: Merge Disks
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 1024
+          temp-reserve-mb: 100
+          root-reserve-mb: 1024
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        timeout-minutes: 30
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+        run: |
+          echo "::group::Free disk space $(date -Is)"
+          df -hT
+          docker images -q | xargs -r docker rmi || true
+          sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android "$AGENT_TOOLSDIRECTORY"
+          echo '::endgroup::'
+          # Keep the runner's installed tools and their dependencies. Bulk purge
+          # and autoremove can spend the entire job in dpkg configuration scripts.
+          echo "::group::APT update $(date -Is)"
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 -y update
+          echo '::endgroup::'
+          echo "::group::Install build dependencies $(date -Is)"
+          # Keep the Ubuntu 22.04 build dependencies here instead of a remote short URL.
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 -y install --no-install-recommends \
+            asciidoc autoconf automake autopoint bc binutils binutils-gold bison \
+            build-essential bzip2 ca-certificates ccache clang cmake cpio curl \
+            device-tree-compiler file flex gawk gettext git gperf \
+            help2man intltool libbsd-dev libelf-dev libffi-dev libfuse-dev libglib2.0-dev \
+            libgmp-dev libltdl-dev liblzma-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libreadline-dev libssl-dev libtool libzstd-dev \
+            lld llvm lz4 lzop make meson mtools ninja-build p7zip-full \
+            patch pkg-config python3 python3-dev python3-distutils python3-pip \
+            python3-ply python3-pyelftools python3-setuptools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig \
+            tar texinfo time u-boot-tools unzip uuid-dev wget xmlto xsltproc xxd \
+            xz-utils zlib1g-dev zstd
+          echo '::endgroup::'
+          sudo -E apt-get -y clean
+          sudo timedatectl set-timezone "$TZ"
+          date -Is
+          df -hT
+
+      - name: Clone Source Code
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/workdir"
+          git clone --single-branch -b "$REPO_BRANCH" "$REPO_URL" "$GITHUB_WORKSPACE/workdir/openwrt"
+          cd "$GITHUB_WORKSPACE/workdir/openwrt"
+          echo "OPENWRT_PATH=$PWD" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Fix Binutils Host Library Paths
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          # Match upstream OpenWrt: host binutils must use host zstd, even when
+          # a restored toolchain already contains target musl headers/libraries.
+          if grep -Fqx 'export ZSTD_CFLAGS=-I$(STAGING_DIR_HOST)/include -pthread' toolchain/binutils/Makefile &&
+             grep -Fqx 'export ZSTD_LIBS=-L$(STAGING_DIR_HOST)/lib -lzstd -lpthread' toolchain/binutils/Makefile; then
+            echo 'Binutils host zstd paths already fixed upstream.'
+          else
+            patch --batch --forward -p1 < "$GITHUB_WORKSPACE/patches/bd-one/010-binutils-host-zstd.patch"
+          fi
+
+      - name: Install G68 SPI NOR Support
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-g68-spinor.py" "$OPENWRT_PATH" --dts "$GITHUB_WORKSPACE/$DTS_FILE"
+          cmp "$GITHUB_WORKSPACE/$DTS_FILE" "$OPENWRT_PATH/target/linux/rockchip/files/arch/arm64/boot/dts/rockchip/rk3568-nsy-g68-plus.dts"
+
+      - name: Install Feeds
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate Variables
+        id: variables
+        run: |
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$OPENWRT_PATH/.config"
+          cd "$OPENWRT_PATH"
+          make defconfig
+          grep -qx 'CONFIG_TARGET_rockchip_armv8_DEVICE_nsy_g68-plus=y' .config
+          ! grep -qx 'CONFIG_NAND_SUPPORT=y' .config
+          cache_digest=$(
+            {
+              printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$SOURCE_COMMIT"
+              sha256sum < "$GITHUB_WORKSPACE/$CONFIG_FILE"
+              sha256sum < "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+              sha256sum < "$GITHUB_WORKSPACE/$DTS_FILE"
+              sha256sum < "$GITHUB_WORKSPACE/scripts/prepare-g68-spinor.py"
+              sha256sum < "$GITHUB_WORKSPACE/boards/g68-spinor/kernel.config"
+              sha256sum < "$GITHUB_WORKSPACE/boards/g68-spinor/image.mk"
+              sha256sum < "$GITHUB_WORKSPACE/patches/bd-one/010-binutils-host-zstd.patch"
+              for feed in packages luci routing telephony; do
+                git -C "feeds/$feed" rev-parse HEAD
+              done
+            } | sha256sum | cut -d ' ' -f1
+          )
+          echo "cache_key=g68-spinor-host-v1-$cache_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Build Cache
+        id: build_cache
+        if: env.CACHE_TOOLCHAIN == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.variables.outputs.cache_key }}
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host*
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/staging_dir/target-*/host
+            ${{ env.OPENWRT_PATH }}/build_dir/host*
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/target-*/host
+
+      - name: Load Custom Configuration
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            mkdir -p "$OPENWRT_PATH/files"
+            cp -a "$GITHUB_WORKSPACE/files/." "$OPENWRT_PATH/files/"
+          fi
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-g68-spinor.py" "$OPENWRT_PATH" --dts "$GITHUB_WORKSPACE/$DTS_FILE"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$OPENWRT_PATH/.config"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_SCRIPT" "$GITHUB_WORKSPACE"/scripts/*.sh
+          cd "$OPENWRT_PATH"
+          "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+          # NOR has a small rootfs partition; preload cores only for a selected OpenClash app.
+          if grep -qx 'CONFIG_PACKAGE_luci-app-openclash=y' .config; then
+            "$GITHUB_WORKSPACE/scripts/preset-clash-core.sh" "$CLASH_KERNEL"
+          fi
+
+      - name: Download DL Package
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          make defconfig
+          for option in \
+            CONFIG_TARGET_rockchip_armv8_DEVICE_nsy_g68-plus \
+            CONFIG_TARGET_ROOTFS_SQUASHFS; do
+            grep -qx "$option=y" .config
+          done
+          ! grep -qx 'CONFIG_NAND_SUPPORT=y' .config
+          ! grep -qx 'CONFIG_PACKAGE_ubi-utils=y' .config
+          make download -j8
+          find dl -type f -size -1024c -print -delete
+
+      - name: Build Toolchain
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          date -Is
+          make toolchain/install -j"$OPENWRT_BUILD_JOBS" || make toolchain/install -j1 V=s
+          date -Is
+
+      # Save before the long package/image build so a later timeout does not
+      # discard the completed toolchain and Rust host compiler from the DIY step.
+      - name: Save Build Cache Before Firmware Compilation
+        if: env.CACHE_TOOLCHAIN == 'true' && steps.build_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 15
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.variables.outputs.cache_key }}
+          path: |
+            ${{ env.OPENWRT_PATH }}/staging_dir/host*
+            ${{ env.OPENWRT_PATH }}/staging_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/staging_dir/target-*/host
+            ${{ env.OPENWRT_PATH }}/build_dir/host*
+            ${{ env.OPENWRT_PATH }}/build_dir/toolchain-*
+            ${{ env.OPENWRT_PATH }}/build_dir/target-*/host
+
+      - name: Compile Firmware
+        id: compile
+        working-directory: ${{ env.OPENWRT_PATH }}
+        run: |
+          mkdir -p files/etc/uci-defaults
+          cp "$GITHUB_WORKSPACE/scripts/init-settings.sh" files/etc/uci-defaults/99-init-settings
+          date -Is
+          printf 'Compile firmware with %s jobs\n' "$OPENWRT_BUILD_JOBS"
+          make -j"$OPENWRT_BUILD_JOBS" || make -j1 V=s
+          date -Is
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "TAG_DATE=$(date +'%Y.%m.%d-%H.%M.%S')" >> "$GITHUB_ENV"
+
+      - name: Organize G68 SPI NOR Images
+        run: |
+          target_path="$OPENWRT_PATH/bin/targets/rockchip/armv8"
+          release_path=$(mktemp -d "$RUNNER_TEMP/g68-spinor-release.XXXXXX")
+          shopt -s nullglob
+          kernels=( "$target_path"/*-nsy_g68-plus-Image )
+          dtbs=( "$target_path"/*-nsy_g68-plus-board.dtb )
+          rootfs=( "$target_path"/*-nsy_g68-plus-squashfs-rootfs.squashfs )
+          kernel_configs=( "$OPENWRT_PATH"/build_dir/target-*/linux-rockchip_armv8/linux-*/.config )
+          for array_name in kernels dtbs rootfs kernel_configs; do
+            declare -n files_ref="$array_name"
+            if [ "${#files_ref[@]}" -ne 1 ] || [ ! -s "${files_ref[0]}" ]; then
+              echo "::error::Missing or ambiguous $array_name output. Check image size warnings: kernel=24 MiB, DTB=512 KiB, rootfs=19.5 MiB."
+              exit 1
+            fi
+            unset -n files_ref
+          done
+          for option in CONFIG_MTD CONFIG_MTD_BLOCK CONFIG_MTD_OF_PARTS CONFIG_MTD_SPI_NOR CONFIG_SPI_MEM CONFIG_SPI_ROCKCHIP_SFC CONFIG_SQUASHFS; do
+            grep -qx "$option=y" "${kernel_configs[0]}"
+          done
+          for option in CONFIG_MTD_SPI_NAND CONFIG_MTD_UBI CONFIG_UBIFS_FS; do
+            ! grep -Eq "^$option=[ym]$" "${kernel_configs[0]}"
+          done
+          check_size() {
+            local filename="$1" limit="$2" size
+            size=$(stat -c %s "$filename")
+            if [ "$size" -gt "$limit" ]; then
+              echo "::error::$filename is $size bytes; its DTS partition allows only $limit bytes."
+              exit 1
+            fi
+          }
+          check_size "${kernels[0]}" $((0x01800000))
+          check_size "${dtbs[0]}" $((0x00080000))
+          check_size "${rootfs[0]}" $((0x01380000))
+          cp "${kernels[0]}" "$release_path/Image"
+          cp "${dtbs[0]}" "$release_path/board.dtb"
+          cp "${rootfs[0]}" "$release_path/rootfs.squashfs"
+          cp "$GITHUB_WORKSPACE/$DTS_FILE" "$release_path/"
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" "$release_path/input.config"
+          cp "$OPENWRT_PATH/.config" "$release_path/build.config"
+          cp "${kernel_configs[0]}" "$release_path/kernel-build.config"
+          cp "$GITHUB_WORKSPACE/boards/g68-spinor/README.md" "$release_path/FLASH-NOTES.txt"
+          git -C "$OPENWRT_PATH" diff -- target/linux/rockchip toolchain/binutils/Makefile > "$release_path/source-changes.patch"
+          printf '%s\n' "$REPO_URL" "$SOURCE_COMMIT" > "$release_path/source-version.txt"
+          cd "$release_path"
+          sha256sum Image board.dtb rootfs.squashfs > g68-spinor-sha256sums
+          echo "FIRMWARE_PATH=$release_path" >> "$GITHUB_ENV"
+
+      - name: Upload Firmware To Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsy-g68-plus-spinor-${{ env.TAG_DATE }}
+          path: ${{ env.FIRMWARE_PATH }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Firmware To Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: NSY G68 SPI NOR ${{ env.TAG_DATE }}
+          tag: ${{ env.TAG_DATE }}-nsy-g68-plus-spinor
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: ${{ env.FIRMWARE_PATH }}/*
+          artifactErrorsFailBuild: true
+          body: |
+            ImmortalWrt for NSY G68 SPI NOR, with a squashfs MTD root filesystem.
+            Source: ${{ env.REPO_URL }} @ ${{ env.SOURCE_COMMIT }}
+            Config: configs/g68-plus-spinor.config
+            DTS: dts/rk3568-nsy-g68-plus-spiNor.dts
+            Includes raw ARM64 Image, board.dtb and rootfs.squashfs.
+            Flash layout: 64 MiB NOR; kernel=24 MiB, DTB=512 KiB, rootfs=19.5 MiB.
+            See FLASH-NOTES.txt for partition offsets and boot arguments.
+
+      - name: Check Space Usage
+        if: always()
+        run: df -hT
